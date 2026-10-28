@@ -7,7 +7,7 @@ is published as a feed that Phoenix VPN reads.
 
 - Package: `com.phoenix.warpscanner`
 - English UI, min SDK 24 (Android 7.0), target SDK 34
-- [Releases](https://github.com/myokooo2004/Warp-IP-Scanner/releases)
+- [Releases](https://github.com/tugyix05/Warp-IP-Scanner/releases)
 
 ## Tabs
 
@@ -69,7 +69,7 @@ MPT, `162.159.192.1–.10` are closed. Only `.11` and up answer.
 
 CI builds and publishes every push to `main`
 (`.github/workflows/build.yml`). The release APK lands in
-[Releases](https://github.com/myokooo2004/Warp-IP-Scanner/releases).
+[Releases](https://github.com/tugyix05/Warp-IP-Scanner/releases).
 
 Local build (Android SDK 34 and JDK 17 required; there is no Gradle
 wrapper in this repo, CI uses Gradle 8.9):

@@ -15,7 +15,7 @@ import java.net.URL
 object GitHubPush {
 
     private const val API =
-        "https://api.github.com/repos/myokooo2004/Warp-IP-Scanner/contents/endpoints.json"
+        "https://api.github.com/repos/tugyix05/Warp-IP-Scanner/contents/endpoints.json"
 
     sealed class Result {
         object Ok : Result()
@@ -79,7 +79,12 @@ object GitHubPush {
             }.toString()
             c.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             val code = c.responseCode
-            if (code == 200 || code == 201) return Result.Ok
+            if (code == 200 || code == 201) {
+                // Publish landed: tell Phoenix via the Firebase signal
+                // (best-effort, never affects this Ok result).
+                FeedSignal.write()
+                return Result.Ok
+            }
             val errBody = try {
                 c.errorStream?.bufferedReader()?.readText()?.take(300)
             } catch (_: Exception) {
