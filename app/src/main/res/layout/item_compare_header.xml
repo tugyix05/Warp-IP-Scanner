@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Compare-mode section header (v1.26), also reused for empty-section
+     placeholders (text/color/gravity overridden in code for those). -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/tvCompareHeader"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="8dp"
+    android:text="BACKUP · 192.x"
+    android:textColor="@color/accent"
+    android:textSize="14sp"
+    android:textStyle="bold" />

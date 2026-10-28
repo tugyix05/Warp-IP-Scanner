@@ -1,0 +1,92 @@
+package com.phoenix.warpscanner
+
+import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+
+/**
+ * Persistent test list of experimental endpoints (v1.22).
+ *
+ * Structurally separate from [BackupStore] on purpose: test entries must
+ * never reach the Stable tab or Publish by accident. Stable re-verify reads
+ * BackupStore only, and Publish pushes the Stable displayed list only, so
+ * entries here are unreachable from the feed path. The only bridges out are
+ * explicit: per-row Promote (to Backup) and Publish-selected (tick + preview).
+ *
+ * Same entry shape and same min-ms accumulation as BackupStore, so test rows
+ * can be compared and promoted without conversion.
+ */
+object TestStore {
+
+    private fun file(ctx: Context): File = File(ctx.filesDir, "test_endpoints.json")
+
+    fun load(ctx: Context): MutableList<BackupEntry> {
+        val out = mutableListOf<BackupEntry>()
+        val f = file(ctx)
+        if (!f.exists()) return out
+        try {
+            val arr = JSONArray(f.readText())
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                out.add(
+                    BackupEntry(
+                        ip = o.getString("ip"),
+                        port = o.getInt("port"),
+                        ms = if (o.isNull("ms")) null else o.getLong("ms"),
+                        jitterMs = if (o.isNull("jitterMs")) null else o.optLong("jitterMs"),
+                        savedAt = o.optLong("savedAt", 0L)
+                    )
+                )
+            }
+        } catch (_: Exception) { /* corrupted file -> start fresh */ }
+        out.sortWith(compareBy({ it.ms ?: Long.MAX_VALUE }, { it.ip }))
+        return out
+    }
+
+    private fun save(ctx: Context, list: List<BackupEntry>) {
+        try {
+            val arr = JSONArray()
+            for (e in list) {
+                arr.put(JSONObject().apply {
+                    put("ip", e.ip)
+                    put("port", e.port)
+                    if (e.ms != null) put("ms", e.ms) else put("ms", JSONObject.NULL)
+                    if (e.jitterMs != null) put("jitterMs", e.jitterMs) else put("jitterMs", JSONObject.NULL)
+                    put("savedAt", e.savedAt)
+                })
+            }
+            file(ctx).writeText(arr.toString())
+        } catch (_: Exception) { /* best effort */ }
+    }
+
+    /** Add or refresh an entry; keeps the lowest observed ms per endpoint. */
+    fun add(ctx: Context, entry: BackupEntry) {
+        val list = load(ctx)
+        val i = list.indexOfFirst { it.ip == entry.ip && it.port == entry.port }
+        if (i >= 0) {
+            val old = list[i]
+            val bestMs = when {
+                old.ms == null -> entry.ms
+                entry.ms == null -> old.ms
+                else -> minOf(old.ms, entry.ms)
+            }
+            list[i] = old.copy(ms = bestMs, jitterMs = entry.jitterMs ?: old.jitterMs, savedAt = entry.savedAt)
+        } else {
+            list.add(entry)
+        }
+        list.sortWith(compareBy({ it.ms ?: Long.MAX_VALUE }, { it.ip }))
+        save(ctx, list)
+    }
+
+    fun remove(ctx: Context, ip: String, port: Int) {
+        val list = load(ctx)
+        list.removeAll { it.ip == ip && it.port == port }
+        save(ctx, list)
+    }
+
+    /** Delete ALL test entries (and only test entries) in one operation. */
+    fun clear(ctx: Context) {
+        try { file(ctx).delete() } catch (_: Exception) {}
+    }
+}

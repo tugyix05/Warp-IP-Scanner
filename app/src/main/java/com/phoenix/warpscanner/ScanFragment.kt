@@ -1,0 +1,507 @@
+package com.phoenix.warpscanner
+
+import android.os.Bundle
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.EditText
+import android.widget.ProgressBar
+import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.fragment.app.Fragment
+import androidx.lifecycle.ViewModelProvider
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+
+/**
+ * One-tap scan of ONE range — 162.159.192.0/24 on port 500 (user spec
+ * 2026-10-23): the whole /24 is enumerated, stable (0%-loss) answers
+ * become candidates, and candidates are handshake-verified in rank
+ * order. The user-chosen count N ("Show … verified") is the run's
+ * target, never a cutoff: no candidate is judged before its full
+ * draws (v1.24).
+ * A candidate that fails a verify draw is retried in later draws and
+ * replaced by the next candidate (backfill); after 4 failed draws it
+ * is shown greyed as failed — nothing disappears silently. When the
+ * candidate pool runs dry before N, the range is re-probed with fresh
+ * engine draws (refill, up to 3). The final status line is the funnel:
+ * probed / candidates / verified / failed counts.
+ * No log box: a single status line shows the current stage.
+ *
+ * v1.15: the census runs as 8 sequential /27 parts and candidates are
+ * verified AS THEY ARRIVE (after each part), instead of probing all
+ * 254 hosts before the first verify — the v1.14 order showed
+ * "Verified (0)" for minutes on a slow line. The census itself is
+ * unchanged: every part of 162.159.192.0/24 is still probed, in
+ * address order, until N is met.
+ *
+ * v1.16: strikes are per-pass only. A candidate that fails 4 draws
+ * yields its slot for the rest of the pass and is retried on the next
+ * pass; the greyed "verify failed" list is computed once at the end
+ * of the run (with its single dead-record) — draws fail, endpoints
+ * don't (user principle 2026-10-24).
+ *
+ * v1.24 (correct-scan design, user go-word 2026-10-26): the Show-N
+ * early stop is GONE from the verdict path — every discovered
+ * candidate gets its full 4 draws per pass before the run ends, and
+ * the run ends only when all discovered candidates are resolved and
+ * N is met (or the census + refills are exhausted). The greyed list
+ * is an evidence label, not a verdict: "not verified this run" with
+ * each row's run-total draw count. Failed draws write NO persistent
+ * record (the v1.16 dead-record is removed) and nothing auto-removes
+ * from Backup — APPEARS ⟹ NOT DEAD (user law 2026-10-26).
+ */
+class ScanFragment : Fragment() {
+
+    private lateinit var engine: ScanEngine
+    private lateinit var adapter: ResultsAdapter
+    private lateinit var vm: ScanViewModel
+
+    private lateinit var btnScan: Button
+    private lateinit var btnCopyTop: Button
+    private lateinit var tvProgress: TextView
+    private lateinit var tvCount: TextView
+    private lateinit var progressBar: ProgressBar
+    private lateinit var etVerifyCount: EditText
+    private lateinit var tvConfStatus: TextView
+    private lateinit var tvConfImport: TextView
+
+    // --- Scan state machine (single scan run) ---
+    private var scanN = 3
+    private val pool = LinkedHashMap<String, ScanResult>()
+    private val triedDraws = mutableMapOf<String, Int>()
+    /** Run-total verify draws per endpoint (v1.24 evidence label; never reset per pass). */
+    private val totalDraws = mutableMapOf<String, Int>()
+    private val verifiedSet = mutableSetOf<String>()
+    private val failedList = mutableListOf<ScanResult>()
+    private var rankedCache: List<ScanResult> = emptyList()
+    private var refillsLeft = 0
+    private var rangeDraws = 0
+    private var chunkIndex = 0
+
+    /** Set while the user pressed Stop; prevents phase 2 from starting. */
+    @Volatile private var cancelled = false
+
+    private companion object {
+        const val PREFS = "scan_prefs"
+        const val KEY_VERIFY_COUNT = "verify_count"
+        const val MAX_REFILLS = 3
+        const val MAX_VERIFY_DRAWS = 4
+        const val RANGE_HOSTS = 254
+        const val CHUNK_HOSTS = 32
+
+        /** The front /24 in address order, probed part by part (v1.15). */
+        val CHUNKS = listOf(
+            "162.159.192.0/27", "162.159.192.32/27", "162.159.192.64/27",
+            "162.159.192.96/27", "162.159.192.128/27", "162.159.192.160/27",
+            "162.159.192.192/27", "162.159.192.224/27"
+        )
+    }
+
+    private val pickConf = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        try {
+            val text = requireContext().contentResolver
+                .openInputStream(uri)?.bufferedReader()?.readText().orEmpty()
+            if (WgConfStore.save(requireContext(), text)) {
+                updateConfRow()
+                toast("WARP config imported")
+            } else {
+                toast("Not a valid WireGuard .conf")
+            }
+        } catch (_: Exception) {
+            toast("Import failed")
+        }
+    }
+
+    override fun onCreateView(inf: LayoutInflater, c: ViewGroup?, s: Bundle?): View? =
+        inf.inflate(R.layout.fragment_scan, c, false)
+
+    override fun onViewCreated(v: View, s: Bundle?) {
+        engine = ScanEngine(requireContext())
+        vm = ViewModelProvider(requireActivity())[ScanViewModel::class.java]
+        adapter = ResultsAdapter(onNeighborScan = { r -> neighborScan(r) })
+
+        btnScan = v.findViewById(R.id.btnScan)
+        btnCopyTop = v.findViewById(R.id.btnCopyTop)
+        tvProgress = v.findViewById(R.id.tvProgress)
+        tvCount = v.findViewById(R.id.tvCount)
+        progressBar = v.findViewById(R.id.progressBar)
+        etVerifyCount = v.findViewById(R.id.etVerifyCount)
+        tvConfStatus = v.findViewById(R.id.tvConfStatus)
+        tvConfImport = v.findViewById(R.id.tvConfImport)
+
+        btnCopyTop.setOnClickListener { copyWinner() }
+
+        updateConfRow()
+        tvConfImport.setOnClickListener { pickConf.launch("*/*") }
+
+        val rv = v.findViewById<RecyclerView>(R.id.rvResults)
+        rv.layoutManager = LinearLayoutManager(requireContext())
+        rv.adapter = adapter
+
+        // Restore verified results from previous scans (survives tab switches).
+        adapter.items = vm.results.toList()
+        updateCount()
+
+        // Persisted "Show N verified" choice (default 3).
+        val savedN = requireContext()
+            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getInt(KEY_VERIFY_COUNT, 3)
+        etVerifyCount.setText(savedN.toString())
+
+        btnScan.setOnClickListener {
+            if (engine.running) {
+                cancelled = true
+                engine.cancel()
+                setIdle()
+                setStatus("Stopped")
+                toast("Stopped")
+            } else startScan()
+        }
+    }
+
+    private fun updateConfRow() {
+        val ok = WgConfStore.exists(requireContext())
+        tvConfStatus.text = if (ok) "WARP config: ✓ loaded" else "WARP config: not loaded"
+        tvConfStatus.setTextColor(
+            if (ok) resources.getColor(R.color.accent, null)
+            else resources.getColor(R.color.gray, null)
+        )
+        tvConfImport.text = if (ok) "Replace" else "Import .conf"
+    }
+
+    /** The scan range is fixed to port 500 (the only WARP port open on the user's line). */
+    private fun selectedPorts(): String = "500"
+
+    private fun updateCount() {
+        tvCount.text = "✓ Verified (${vm.results.size})"
+        btnCopyTop.visibility = if (vm.results.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    /** One-tap winner export: copies the #1 endpoint for pasting into the VPN app. */
+    private fun copyWinner() {
+        val top = vm.results.firstOrNull() ?: return
+        val cm = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("endpoint", top.endpoint))
+        toast("${top.endpoint} copy ကူးပြီးပြီ")
+    }
+
+    private fun setStatus(msg: String) {
+        tvProgress.text = msg
+    }
+
+    /** Start a scan run: reset state, then probe the range. */
+    private fun startScan() {
+        if (!WgConfStore.exists(requireContext())) {
+            toast("Import your WARP .conf first")
+            return
+        }
+        cancelled = false
+        vm.clear()
+        adapter.items = emptyList()
+        adapter.failedEndpoints = emptySet()
+        updateCount()
+        scanN = etVerifyCount.text.toString().toIntOrNull()?.coerceIn(1, 20) ?: 3
+        etVerifyCount.setText(scanN.toString())
+        requireContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putInt(KEY_VERIFY_COUNT, scanN).apply()
+        pool.clear()
+        triedDraws.clear()
+        totalDraws.clear()
+        adapter.failedDraws = emptyMap()
+        verifiedSet.clear()
+        failedList.clear()
+        rankedCache = emptyList()
+        refillsLeft = MAX_REFILLS
+        rangeDraws = 0
+        btnScan.text = "■ Stop"
+        progressBar.visibility = View.VISIBLE
+        runRangeDraw()
+    }
+
+    /**
+     * One enumeration pass over 162.159.192.0/24, probed part by part
+     * (8 × /27, address order). Each part is a fresh engine process
+     * (fresh sockets/flows); stable (0%-loss) answers join the
+     * candidate pool and are verified as soon as their part lands —
+     * the census still covers the whole range, but the first verified
+     * result no longer waits for all 254 hosts. Later passes are
+     * refills when the pool ran dry before N verified.
+     */
+    private fun runRangeDraw() {
+        if (cancelled) return
+        rangeDraws++
+        chunkIndex = 0
+        // Fresh pass, fresh draws: strike counts reset, so candidates
+        // that yielded their slot last pass are retried (v1.16).
+        triedDraws.clear()
+        runNextChunk()
+    }
+
+    /** Probe the current /27 part, then rank + verify what it yielded. */
+    private fun runNextChunk() {
+        if (cancelled) return
+        setStatus(
+            "Probing 162.159.192.0/24 · part ${chunkIndex + 1}/${CHUNKS.size} · " +
+                "draw $rangeDraws · ${pool.size} candidates · verified ${verifiedSet.size}/$scanN…"
+        )
+        engine.scan(
+            ScanHelper.rangeScanArgs(CHUNKS[chunkIndex], selectedPorts(), CHUNK_HOSTS),
+            onResult = { r ->
+                if (ScanHelper.isStable(r)) {
+                    synchronized(pool) {
+                        if (!pool.containsKey(r.endpoint)) pool[r.endpoint] = r
+                    }
+                }
+            },
+            onProgress = {},
+            onDone = { ok, err ->
+                activity?.runOnUiThread {
+                    if (cancelled) return@runOnUiThread
+                    if (!ok && pool.isEmpty()) {
+                        finishScan(ok = false, err = err)
+                    } else {
+                        rankPool()
+                        verifyStep()
+                    }
+                }
+            }
+        )
+    }
+
+    /**
+     * The pool ran dry before N: continue the census with the next
+     * part; when every part is probed, refill with a fresh pass
+     * (bounded by MAX_REFILLS); otherwise finish.
+     */
+    private fun continueDraw() {
+        if (chunkIndex < CHUNKS.size - 1) {
+            chunkIndex++
+            runNextChunk()
+        } else if (refillsLeft > 0) {
+            refillsLeft--
+            runRangeDraw()
+        } else {
+            finishScan(ok = true, err = null)
+        }
+    }
+
+    /** Rank the candidate pool (front range exempt from known-dead burial). */
+    private fun rankPool() {
+        val ctx = requireContext()
+        rankedCache = synchronized(pool) {
+            ScanHelper.ranked(
+                pool.values.filter {
+                    // The front range is exempt from the known-dead
+                    // burial: its dead marks are manufactured by
+                    // bad-flow runs (one shared socket per endpoint
+                    // per run), so it is always re-judged on this
+                    // run's own evidence.
+                    ScanHelper.rangeTier(it.ip) == 0 ||
+                        !EndpointHistoryStore.isKnownDead(ctx, it.endpoint)
+                },
+                goodCount = { EndpointHistoryStore.goodCount(ctx, it) }
+            )
+        }
+    }
+
+    /**
+     * Advance verification (v1.24): verify EVERY still-unresolved
+     * candidate in rank order — no take(need), no early finish on N.
+     * A batch gives each working candidate one more draw; batches
+     * repeat until every discovered candidate is verified or has
+     * spent its 4 draws in this pass. Only then does the run end
+     * (target N met with all discovered candidates judged) or
+     * continue (next chunk / refill). No candidate is ever judged on
+     * zero draws.
+     */
+    private fun verifyStep() {
+        if (cancelled) return
+        val failedEndpoints = failedList.map { it.endpoint }.toSet()
+        val working = rankedCache.filter {
+            it.endpoint !in verifiedSet &&
+                it.endpoint !in failedEndpoints &&
+                (triedDraws[it.endpoint] ?: 0) < MAX_VERIFY_DRAWS
+        }
+        if (working.isEmpty()) {
+            if (verifiedSet.size >= scanN) {
+                finishScan(ok = true, err = null)
+            } else {
+                continueDraw()
+            }
+            return
+        }
+        verifyBatch(working)
+    }
+
+    /**
+     * One verify batch = one fresh engine process (fresh sockets/flows)
+     * over the working candidates. An endpoint counts as verified if it
+     * completes the full handshake in ANY draw — the scanner-side twin
+     * of the VPN's flow re-roll. Endpoints that fail get one strike per
+     * batch; at 4 strikes they yield their slot for the rest of the
+     * pass (v1.16) and are retried on the next pass. The not-verified
+     * list is computed once at the end of the run, with each row's
+     * run-total draw count — draws are evidence, never a death
+     * verdict, and failed draws write no persistent record (v1.24).
+     */
+    private fun verifyBatch(working: List<ScanResult>) {
+        setStatus("Verifying handshake ${verifiedSet.size}/$scanN…")
+        val ctx = requireContext()
+        engine.scan(
+            ScanHelper.verifyArgs(working, WgConfStore.path(ctx)),
+            onResult = { r ->
+                // The engine only reports endpoints that completed the handshake.
+                if (verifiedSet.add(r.endpoint)) {
+                    val isNew = vm.add(r)
+                    EndpointHistoryStore.recordStableResult(ctx, r.endpoint, r.latencyMs, r.jitterMs, alive = true)
+                    BackupStore.add(
+                        ctx,
+                        BackupEntry(ip = r.ip, port = r.port, ms = r.latencyMs, jitterMs = r.jitterMs, savedAt = System.currentTimeMillis())
+                    )
+                    // Step 1 (state machine): verify landing = working evidence.
+                    EndpointStateStore.markWorking(ctx, r.ip)
+                    activity?.runOnUiThread {
+                        if (isNew) refreshResults()
+                        setStatus("Verifying handshake ${verifiedSet.size}/$scanN…")
+                    }
+                }
+            },
+            onProgress = {},
+            onDone = { ok, err ->
+                activity?.runOnUiThread {
+                    if (cancelled) return@runOnUiThread
+                    if (!ok) {
+                        finishScan(ok = false, err = err)
+                        return@runOnUiThread
+                    }
+                    for (c in working) {
+                        if (c.endpoint !in verifiedSet) {
+                            // v1.16: a strike only yields the slot for
+                            // THIS pass — draws fail, endpoints don't.
+                            // The candidate stays retryable on the next
+                            // pass (strikes reset there) and is never
+                            // failed-listed or buried mid-run.
+                            triedDraws[c.endpoint] = (triedDraws[c.endpoint] ?: 0) + 1
+                            // v1.24: run-total draws — the evidence the
+                            // not-verified row's label reports at finish.
+                            totalDraws[c.endpoint] = (totalDraws[c.endpoint] ?: 0) + 1
+                        }
+                    }
+                    refreshResults()
+                    verifyStep()
+                }
+            }
+        )
+    }
+
+    /** Verified rows first (rank order), then this run's not-verified candidates. */
+    private fun refreshResults() {
+        adapter.failedEndpoints = failedList.map { it.endpoint }.toSet()
+        adapter.failedDraws = failedList.associate { it.endpoint to (totalDraws[it.endpoint] ?: 0) }
+        // Step 1 (state machine): state tags for recorded failed rows.
+        // Guarded: setting adapter fields is safe detached, but the
+        // context read is not — keep the previous tags when detached.
+        if (isAdded) adapter.stateTags = EndpointStateStore.displayMap(requireContext())
+        adapter.items = vm.results.toList() +
+            failedList.map { it.copy(latencyMs = null, jitterMs = null) }
+        updateCount()
+    }
+
+    /** Final bookkeeping + the funnel status line. */
+    private fun finishScan(ok: Boolean, err: String?) {
+        val ctx = requireContext()
+        // Run report (v1.24): candidates that never verified in ANY
+        // pass are shown greyed with their run-total draw count — a
+        // report of this run's evidence, not a death sentence. Failed
+        // draws write NO persistent record: a row that appears here
+        // is not dead (APPEARS ⟹ NOT DEAD, user law 2026-10-26), and
+        // only an explicit user delete removes anything from Backup.
+        failedList.clear()
+        failedList.addAll(rankedCache.filter { it.endpoint !in verifiedSet })
+        // Step 1 (state machine): these candidates appeared this run
+        // (shape answered) — record appearance only. No streak, no
+        // verdict: APPEARS ⟹ NOT DEAD, and SILENT outcomes update
+        // nothing in step 1.
+        for (row in failedList) EndpointStateStore.markSeen(ctx, row.ip)
+        // Final order: staged rank with history tiebreak — best on top.
+        // (Note: the "NO persistent record" comment above means no
+        // dead/failure record — step 1's markSeen writes appearance
+        // evidence only, never a verdict.)
+        vm.sortStaged { EndpointHistoryStore.goodCount(ctx, it) }
+        refreshResults()
+        setIdle()
+        val funnel = "Probed $RANGE_HOSTS · Candidates ${pool.size} · " +
+            "Verified ${verifiedSet.size}/$scanN · ${failedList.size} not verified"
+        when {
+            cancelled -> setStatus("Stopped")
+            !ok -> {
+                setStatus("Scan error · $funnel")
+                toast("Error: ${err ?: "unknown"}")
+            }
+            vm.results.isEmpty() -> {
+                setStatus("No handshake-verified endpoint · $funnel")
+                toast("No handshake-verified endpoint")
+            }
+            else -> {
+                setStatus("✓ ${vm.results.size} verified — saved to Backup · $funnel")
+                toast("✓ ${vm.results.size} verified")
+                // Feed the Range tab: /24s of the verified endpoints (rank order).
+                vm.verifiedCidrs = vm.results
+                    .map { ScanHelper.cidr24(it.ip) }
+                    .distinct()
+                    .joinToString(",")
+            }
+        }
+    }
+
+    /** Per-endpoint "/24" button: neighbor-scan that IP's /24 into the backup list. */
+    private fun neighborScan(r: ScanResult) {
+        if (engine.running) {
+            toast("A scan is running — wait for it to finish")
+            return
+        }
+        val cidr = ScanHelper.cidr24(r.ip)
+        toast("Scanning $cidr…")
+        engine.scan(
+            ScanHelper.rangeScanArgs(cidr, selectedPorts(), 30),
+            onResult = { hit ->
+                if (ScanHelper.isStable(hit)) {
+                    BackupStore.add(
+                        requireContext(),
+                        BackupEntry(ip = hit.ip, port = hit.port, ms = hit.latencyMs, jitterMs = hit.jitterMs, savedAt = System.currentTimeMillis())
+                    )
+                    // Step 1 (state machine): stable neighbor = working evidence.
+                    EndpointStateStore.markWorking(requireContext(), hit.ip)
+                }
+            },
+            onProgress = {},
+            onDone = { ok, err ->
+                activity?.runOnUiThread {
+                    if (ok) toast("$cidr done — added to Backup")
+                    else toast("Error: ${err ?: "unknown"}")
+                }
+            }
+        )
+    }
+
+    private fun setIdle() {
+        btnScan.text = "SCAN"
+        progressBar.visibility = View.GONE
+    }
+
+    private fun toast(m: String) =
+        Toast.makeText(requireContext(), m, Toast.LENGTH_SHORT).show()
+
+    override fun onDestroyView() {
+        cancelled = true
+        engine.cancel()
+        super.onDestroyView()
+    }
+}
