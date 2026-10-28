@@ -7,15 +7,17 @@ import java.net.SocketTimeoutException
 import java.net.URL
 
 /**
- * Pushes endpoints.json to the Warp-IP-Scanner repo via the GitHub
- * contents API. Call off the main thread.
+ * Pushes endpoints.json to the Warp-IP-Scanner repo via the Lovable
+ * publish relay, which forwards to the GitHub contents API.
+ * Call off the main thread.
  *
  * The token is used only in the Authorization header and is never logged.
+ * The relay stores no secret: it forwards the caller's token.
  */
 object GitHubPush {
 
     private const val API =
-        "https://api.github.com/repos/tugyix05/Warp-IP-Scanner/contents/endpoints.json"
+        "https://ipmh.lovable.app/api/publish/repos/tugyix05/Warp-IP-Scanner/contents/endpoints.json"
 
     sealed class Result {
         object Ok : Result()
@@ -80,9 +82,6 @@ object GitHubPush {
             c.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             val code = c.responseCode
             if (code == 200 || code == 201) {
-                // Publish landed: tell Phoenix via the Firebase signal
-                // (best-effort, never affects this Ok result).
-                FeedSignal.write()
                 return Result.Ok
             }
             val errBody = try {
