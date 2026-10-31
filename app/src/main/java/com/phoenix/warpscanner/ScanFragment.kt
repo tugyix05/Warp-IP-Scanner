@@ -88,8 +88,6 @@ class ScanFragment : Fragment() {
     @Volatile private var cancelled = false
 
     private companion object {
-        const val PREFS = "scan_prefs"
-        const val KEY_VERIFY_COUNT = "verify_count"
         const val MAX_REFILLS = 3
         const val MAX_VERIFY_DRAWS = 4
         const val RANGE_HOSTS = 254
@@ -149,11 +147,10 @@ class ScanFragment : Fragment() {
         adapter.items = vm.results.toList()
         updateCount()
 
-        // Persisted "Show N verified" choice (default 3).
-        val savedN = requireContext()
-            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getInt(KEY_VERIFY_COUNT, 3)
-        etVerifyCount.setText(savedN.toString())
+        // Fixed stop target (v1.30): the run stops as soon as 10
+        // endpoints are verified — the "Show N" choice is gone.
+        etVerifyCount.setText("10")
+        etVerifyCount.isEnabled = false
 
         btnScan.setOnClickListener {
             if (engine.running) {
@@ -207,10 +204,9 @@ class ScanFragment : Fragment() {
         adapter.items = emptyList()
         adapter.failedEndpoints = emptySet()
         updateCount()
-        scanN = etVerifyCount.text.toString().toIntOrNull()?.coerceIn(1, 20) ?: 3
-        etVerifyCount.setText(scanN.toString())
-        requireContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putInt(KEY_VERIFY_COUNT, scanN).apply()
+        // Fixed stop target (v1.30): 10 verified, then stop immediately.
+        scanN = 10
+        etVerifyCount.setText("10")
         pool.clear()
         triedDraws.clear()
         totalDraws.clear()
@@ -368,8 +364,18 @@ class ScanFragment : Fragment() {
                     // Step 1 (state machine): verify landing = working evidence.
                     EndpointStateStore.markWorking(ctx, r.ip)
                     activity?.runOnUiThread {
+                        if (cancelled) return@runOnUiThread
                         if (isNew) refreshResults()
                         setStatus("Verifying handshake ${verifiedSet.size}/$scanN…")
+                        // v1.30: stop IMMEDIATELY at the 10th verified
+                        // landing — no grinding through the remaining pool.
+                        // finishScan runs BEFORE cancelled is set, so the
+                        // finish reports success (not "Stopped").
+                        if (verifiedSet.size >= scanN) {
+                            finishScan(ok = true, err = null)
+                            cancelled = true
+                            engine.cancel()
+                        }
                     }
                 }
             },

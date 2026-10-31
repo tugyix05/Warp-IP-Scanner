@@ -95,5 +95,12 @@
             android:text=""
             android:textColor="@color/gray"
             android:textSize="12sp" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvRangeStable"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:nestedScrollingEnabled="false" />
     </LinearLayout>
 </ScrollView>

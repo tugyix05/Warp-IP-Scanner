@@ -12,6 +12,8 @@ import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModelProvider
 import androidx.core.widget.doAfterTextChanged
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 
 /**
  * Range scan: user-supplied CIDRs -> stable endpoints appended to the
@@ -24,9 +26,11 @@ import androidx.core.widget.doAfterTextChanged
  * (fresh flows each pass) over the same CIDRs, and an endpoint is saved
  * if it is stable (0% loss) in ANY of the 4 passes — the same union
  * rule as Scan/Stable. Four passes widen discovery (more draws for
- * each endpoint to prove itself); they do not narrow it. Saves happen
- * once, after pass 4, with the last stable pass's values. A failed pass
- * saves nothing on its own. The TEST destination is frozen at run start.
+ * each endpoint to prove itself); they do not narrow it.
+ * v1.30: a stable endpoint shows as a row AND saves the moment it
+ * lands (no waiting for pass 4), and the run stops as soon as 10
+ * distinct stable endpoints are collected. The TEST destination is
+ * frozen at run start.
  */
 class RangeFragment : Fragment() {
 
@@ -39,9 +43,13 @@ class RangeFragment : Fragment() {
     private lateinit var vm: ScanViewModel
     private var added = 0
 
-    /** 4-pass run state (v1.23). */
+    /** 4-pass run state (v1.23). v1.30: the union across passes is the
+     *  live state — rows show and save as they land, and the run stops
+     *  as soon as 10 distinct stable endpoints are collected. */
     private var rangePass = 0
-    private val passStables = mutableListOf<Map<String, ScanResult>>()
+    private val rangeUnion = LinkedHashMap<String, ScanResult>()
+    private lateinit var rvRangeStable: RecyclerView
+    private val rangeAdapter = RangeStableAdapter()
     private var rangeStopped = false
     private var rangeDestTest = false
     private var rangeCidrs = ""
@@ -49,6 +57,9 @@ class RangeFragment : Fragment() {
 
     companion object {
         private const val RANGE_PASSES = 4
+        /** v1.30: stop as soon as this many distinct stable endpoints
+         *  are collected — in one pass, or accumulated across passes. */
+        private const val RANGE_STOP_AT = 10
     }
 
     /** True while the CIDR field is being set programmatically (not by the user). */
@@ -65,6 +76,10 @@ class RangeFragment : Fragment() {
         cbTest = v.findViewById(R.id.cbTest)
         btnScan = v.findViewById(R.id.btnRangeScan)
         tvProgress = v.findViewById(R.id.tvRangeProgress)
+        rvRangeStable = v.findViewById(R.id.rvRangeStable)
+        rvRangeStable.layoutManager = LinearLayoutManager(requireContext())
+        rvRangeStable.adapter = rangeAdapter
+        rvRangeStable.isNestedScrollingEnabled = false
 
         refreshCidrField()
         etPorts.setText("500")
@@ -81,6 +96,10 @@ class RangeFragment : Fragment() {
                 rangeStopped = true
                 engine.cancel()
                 btnScan.text = "Scan range"
+                // v1.30: Stop keeps what is already stable — rows are
+                // saved as they land, so nothing found so far is lost.
+                val dest = if (rangeDestTest) "Test" else "Backup"
+                tvProgress.text = "Stopped — ${rangeUnion.size} stable kept in $dest"
                 return@setOnClickListener
             }
             val cidrs = etCidrs.text.toString().trim()
@@ -93,7 +112,8 @@ class RangeFragment : Fragment() {
             rangeDestTest = cbTest.isChecked
             added = 0
             rangePass = 1
-            passStables.clear()
+            rangeUnion.clear()
+            rangeAdapter.items = emptyList()
             rangeStopped = false
             btnScan.text = "■ Stop"
             tvProgress.text = "Pass 1/$RANGE_PASSES — starting…"
@@ -129,19 +149,33 @@ class RangeFragment : Fragment() {
 
     /**
      * One of the 4 range passes: a fresh engine process (fresh flows)
-     * over the same CIDRs. Stable (0%-loss) answers join this pass's
-     * set; the union of all 4 sets is saved at the end.
+     * over the same CIDRs. Stable (0%-loss) answers join the live
+     * union at once (v1.30: shown + saved on landing, run stops at 10).
      */
     private fun runRangePass() {
-        val passStable = mutableMapOf<String, ScanResult>()
         engine.scan(
             ScanHelper.rangeScanArgs(rangeCidrs, rangePorts, 50),
             onResult = { r ->
                 if (ScanHelper.isStable(r)) {
-                    passStable[r.endpoint] = r
+                    // v1.30: show + save IMMEDIATELY on landing — no
+                    // waiting for pass 4, and Stop loses nothing.
+                    val appCtx = activity?.applicationContext
+                    if (appCtx != null) {
+                        rangeUnion[r.endpoint] = r
+                        saveRangeOne(appCtx, r)
+                    }
                     activity?.runOnUiThread {
-                        if (!rangeStopped) {
-                            tvProgress.text = "Pass $rangePass/$RANGE_PASSES — ${passStable.size} stable…"
+                        rangeAdapter.items = rangeUnion.values.toList()
+                        if (rangeStopped) return@runOnUiThread
+                        tvProgress.text = "Pass $rangePass/$RANGE_PASSES — ${rangeUnion.size} stable…"
+                        // v1.30: stop as soon as 10 distinct stable
+                        // endpoints are collected (one pass or accumulated).
+                        if (rangeUnion.size >= RANGE_STOP_AT) {
+                            rangeStopped = true
+                            engine.cancel()
+                            btnScan.text = "Scan range"
+                            val dest = if (rangeDestTest) "Test" else "Backup"
+                            tvProgress.text = "Stopped — 10 stable saved to $dest"
                         }
                     }
                 }
@@ -164,7 +198,6 @@ class RangeFragment : Fragment() {
                         Toast.makeText(act.applicationContext, "Error: ${err ?: "unknown"}", Toast.LENGTH_SHORT).show()
                         return@runOnUiThread
                     }
-                    passStables.add(passStable.toMap())
                     if (rangePass < RANGE_PASSES) {
                         rangePass++
                         tvProgress.text = "Pass $rangePass/$RANGE_PASSES — starting…"
@@ -177,28 +210,29 @@ class RangeFragment : Fragment() {
         )
     }
 
+    /** One stable landing's save (v1.30): called the moment the endpoint
+     *  proves stable, not at the end of the run — so Stop and the
+     *  10-stop keep everything found so far. Store min-ms invariant
+     *  still applies inside the stores. */
+    private fun saveRangeOne(ctx: android.content.Context, r: ScanResult) {
+        val entry = BackupEntry(
+            ip = r.ip, port = r.port, ms = r.latencyMs,
+            jitterMs = r.jitterMs, savedAt = System.currentTimeMillis()
+        )
+        if (rangeDestTest) TestStore.add(ctx, entry) else BackupStore.add(ctx, entry)
+        // Step 1 (state machine): stable in 1+ of 4 passes = working evidence.
+        EndpointStateStore.markWorking(ctx, r.ip)
+    }
+
     /**
-     * Save every endpoint stable in ANY of the 4 passes (4-draw
-     * standard, union rule — same as Scan/Stable). Last stable pass
-     * wins per endpoint (same as Stable's associateBy): a failed draw
-     * says nothing about the endpoint, so one stable pass is proof it
-     * works.
+     * End of a full 4-pass run (v1.30): saves already happened per
+     * landing, so this only reports the union total. A failed pass
+     * saves nothing on its own.
      */
     private fun finishRangePasses(act: android.app.Activity) {
         btnScan.text = "Scan range"
         val ctx = act.applicationContext
-        val union = mutableMapOf<String, ScanResult>()
-        for (m in passStables) union.putAll(m)
-        for ((_, r) in union) {
-            val entry = BackupEntry(
-                ip = r.ip, port = r.port, ms = r.latencyMs,
-                jitterMs = r.jitterMs, savedAt = System.currentTimeMillis()
-            )
-            if (rangeDestTest) TestStore.add(ctx, entry) else BackupStore.add(ctx, entry)
-            // Step 1 (state machine): stable in 1+ of 4 passes = working evidence.
-            EndpointStateStore.markWorking(ctx, r.ip)
-            added++
-        }
+        added = rangeUnion.size
         val dest = if (rangeDestTest) "Test" else "Backup"
         tvProgress.text = "Done — $added stable in 1+ of 4 passes"
         Toast.makeText(ctx, "Done — added $added to $dest (stable in 1+ of 4 passes)", Toast.LENGTH_SHORT).show()
