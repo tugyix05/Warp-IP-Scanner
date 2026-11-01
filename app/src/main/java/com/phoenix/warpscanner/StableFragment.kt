@@ -81,6 +81,7 @@ class StableFragment : Fragment() {
     private lateinit var layoutCompare: LinearLayout
     private lateinit var rvCompare: RecyclerView
     private lateinit var btnCompareRefresh: Button
+    private lateinit var btnCompareSelectAll: Button
     private lateinit var btnComparePublishSelected: Button
     private var compareBackup: List<ScanResult> = emptyList()
     private var compareTest: List<ScanResult> = emptyList()
@@ -217,9 +218,11 @@ class StableFragment : Fragment() {
         rvCompare.layoutManager = LinearLayoutManager(requireContext())
         rvCompare.adapter = compareAdapter
         btnCompareRefresh = v.findViewById(R.id.btnCompareRefresh)
+        btnCompareSelectAll = v.findViewById(R.id.btnCompareSelectAll)
         btnComparePublishSelected = v.findViewById(R.id.btnComparePublishSelected)
         btnCompare.setOnClickListener { toggleCompare() }
         btnCompareRefresh.setOnClickListener { compareRefreshOrCancel() }
+        btnCompareSelectAll.setOnClickListener { compareSelectAll() }
         btnComparePublishSelected.setOnClickListener { comparePublishSelected() }
 
         // v1.23: opened from Backup's "→ Stable" with the Test list.
@@ -1096,9 +1099,30 @@ class StableFragment : Fragment() {
     }
 
     /**
+     * Compare Select All (v1.31): tick every visible compare row —
+     * BACKUP (192.x) + TEST (195.x) together, up to 20 with the
+     * current 10 + 10 source caps. Tapping again is a no-op (all are
+     * already ticked); there is no deselect-all on this button.
+     * Reuses the shared [selected] set, so PUBLISH SELECTED counts
+     * update at once in both views.
+     */
+    private fun compareSelectAll() {
+        val all = (compareBackup + compareTest).distinctBy { it.endpoint }
+        if (all.isEmpty()) {
+            toast("Run a Stable scan first")
+            return
+        }
+        all.forEach { selected.add(it.endpoint) }
+        refreshCompareAdapter()
+        updateComparePublishText()
+        updatePublishSelectedText()
+    }
+
+    /**
      * Compare publish-selected: mirrors [publishSelected] but over the
      * compare lists, so the live-feed publish path itself stays
      * untouched. Same v1.27 shape: confirm only, no JSON preview.
+     * v1.31: no 10 cap — every ticked row publishes, up to 20.
      */
     private fun comparePublishSelected() {
         val pool = (compareBackup + compareTest).distinctBy { it.endpoint }
@@ -1113,7 +1137,7 @@ class StableFragment : Fragment() {
                 { (it.latencyMs ?: Long.MAX_VALUE) + (it.jitterMs ?: 0L) },
                 { it.ip }
             )
-        ).take(10)
+        )
         val json = buildPublishJson(rankedSel)
         showPublishConfirm { comparePushSelectedJson(json) }
     }
@@ -1264,7 +1288,8 @@ class StableFragment : Fragment() {
      * Publish-selected (v1.22): the override path. Ticks from either view
      * (selection survives source switches) form the feed — exactly the
      * picked endpoints, in displayed rank order (range tier, then
-     * ms+jitter), capped at 10 like the normal feed. v1.27: NO JSON
+     * ms+jitter). v1.31: NO 10 cap — every ticked row publishes
+     * (up to 20 with the current 10 + 10 source caps). v1.27: NO JSON
      * preview (user 2026-10-27: nothing to view there) — the Yes/No
      * confirm below is the only step before the push. The push still
      * replaces endpoints.json wholesale.
@@ -1282,7 +1307,7 @@ class StableFragment : Fragment() {
                 { (it.latencyMs ?: Long.MAX_VALUE) + (it.jitterMs ?: 0L) },
                 { it.ip }
             )
-        ).take(10)
+        )
         val json = buildPublishJson(rankedSel)
         showPublishConfirm { pushSelectedJson(json) }
     }

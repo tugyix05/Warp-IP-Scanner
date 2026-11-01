@@ -236,6 +236,20 @@
                 android:textStyle="bold" />
 
             <Button
+                android:id="@+id/btnCompareSelectAll"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:backgroundTint="@color/bg"
+                android:minWidth="0dp"
+                android:paddingLeft="6dp"
+                android:paddingRight="6dp"
+                android:text="SELECT ALL"
+                android:textColor="@color/accent"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <Button
                 android:id="@+id/btnComparePublishSelected"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
