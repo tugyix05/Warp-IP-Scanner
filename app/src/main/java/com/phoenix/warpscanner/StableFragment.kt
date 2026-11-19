@@ -1433,6 +1433,12 @@ class StableFragment : Fragment() {
             put("v", 1)
             put("updated_at", sdf.format(Date()))
             put("isp", "MPT")
+            // v1.32: every published file carries the feed URL fields, so a
+            // Scanner publish can never strip them. These are the defaults;
+            // GitHubPush overwrites them with the live file's values at push
+            // time, so a changed link is never reset back to a default.
+            put("generator_url", GitHubPush.DEFAULT_GENERATOR_URL)
+            put("update_url", GitHubPush.DEFAULT_UPDATE_URL)
             put("endpoints", eps)
         }.toString(2)
     }

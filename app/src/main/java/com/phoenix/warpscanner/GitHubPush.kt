@@ -24,13 +24,31 @@ object GitHubPush {
         data class Err(val reason: String) : Result()
     }
 
+    /**
+     * Feed URL fields (v1.32): every published endpoints.json must carry
+     * these, or the companion VPN app loses its remotely-changeable links.
+     * Defaults = the values the VPN app hardcodes today; the live file's
+     * values win whenever they exist (see [withLiveUrls]).
+     */
+    const val DEFAULT_GENERATOR_URL = "https://pguard.val.run/"
+    const val DEFAULT_UPDATE_URL = "https://ipmh.lovable.app/api/public/apk/phoenix-vpn-v18"
+
+    /** The live endpoints.json as it stands on GitHub right now. */
+    private class CurrentFile(
+        val sha: String?,
+        val generatorUrl: String,
+        val updateUrl: String
+    )
+
     fun push(token: String, json: String): Result {
         // One retry on timeout — mobile networks stall transiently.
         var attempt = 0
         while (true) {
             try {
-                val sha = getSha(token) // null when the file doesn't exist yet
-                return put(token, json, sha)
+                val current = getCurrent(token) // sha null when the file doesn't exist yet
+                // Merge the LIVE url fields over the built JSON, so a publish
+                // never resets a changed link back to the defaults.
+                return put(token, withLiveUrls(json, current.generatorUrl, current.updateUrl), current.sha)
             } catch (e: SocketTimeoutException) {
                 if (++attempt >= 2) return Result.Err("timed out — check connection")
             } catch (e: Exception) {
@@ -39,8 +57,8 @@ object GitHubPush {
         }
     }
 
-    /** Current blob sha, or null if the file doesn't exist yet (404). */
-    private fun getSha(token: String): String? {
+    /** Current blob sha + live feed URL fields, or defaults if the file doesn't exist yet (404). */
+    private fun getCurrent(token: String): CurrentFile {
         val c = (URL(API).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             setRequestProperty("Authorization", "Bearer $token")
@@ -50,13 +68,48 @@ object GitHubPush {
         }
         try {
             return when (c.responseCode) {
-                200 -> JSONObject(c.inputStream.bufferedReader().readText())
-                    .optString("sha", null)
-                404 -> null
+                200 -> {
+                    val body = JSONObject(c.inputStream.bufferedReader().readText())
+                    val live = try {
+                        val raw = body.optString("content", "")
+                        if (raw.isBlank()) JSONObject()
+                        else JSONObject(String(Base64.decode(raw, Base64.DEFAULT), Charsets.UTF_8))
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+                    CurrentFile(
+                        body.optString("sha", null),
+                        liveUrl(live, "generator_url", DEFAULT_GENERATOR_URL),
+                        liveUrl(live, "update_url", DEFAULT_UPDATE_URL)
+                    )
+                }
+                404 -> CurrentFile(null, DEFAULT_GENERATOR_URL, DEFAULT_UPDATE_URL)
                 else -> throw Exception("GitHub GET failed: HTTP ${c.responseCode}")
             }
         } finally {
             c.disconnect()
+        }
+    }
+
+    /** A live URL value, or the fallback when the key is missing/blank/null. */
+    private fun liveUrl(obj: JSONObject, key: String, fallback: String): String {
+        val v = obj.optString(key, "").trim()
+        return if (v.isEmpty() || v == "null") fallback else v
+    }
+
+    /**
+     * Overwrite the two feed URL fields in the outgoing JSON with the live
+     * file's values. Never breaks a publish: on any failure the built JSON
+     * is returned untouched (it already carries the defaults).
+     */
+    private fun withLiveUrls(json: String, generatorUrl: String, updateUrl: String): String {
+        return try {
+            JSONObject(json).apply {
+                put("generator_url", generatorUrl)
+                put("update_url", updateUrl)
+            }.toString(2)
+        } catch (_: Exception) {
+            json
         }
     }
 
