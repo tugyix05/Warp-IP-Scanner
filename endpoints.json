@@ -2,6 +2,8 @@
   "v": 1,
   "updated_at": "2026-11-18T05:33:59Z",
   "isp": "MPT",
+  "generator_url": "https://pguard.val.run/",
+  "update_url": "https://ipmh.lovable.app/api/public/apk/phoenix-vpn-v18",
   "endpoints": [
     {
       "ip": "162.159.192.78",
