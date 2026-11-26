@@ -79,7 +79,9 @@ class RangeFragment : Fragment() {
         rvRangeStable = v.findViewById(R.id.rvRangeStable)
         rvRangeStable.layoutManager = LinearLayoutManager(requireContext())
         rvRangeStable.adapter = rangeAdapter
-        rvRangeStable.isNestedScrollingEnabled = false
+        // v1.33: nested scrolling RE-ENABLED (was false) — the list is
+        // now the only scroller on this tab (no ScrollView parent),
+        // so it must scroll on its own to reach all 10 rows.
 
         refreshCidrField()
         etPorts.setText("500")

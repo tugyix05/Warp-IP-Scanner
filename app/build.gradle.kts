@@ -11,8 +11,8 @@ android {
         applicationId = "com.phoenix.warpscanner"
         minSdk = 24
         targetSdk = 34
-        versionCode = 31
-        versionName = "1.32"
+        versionCode = 32
+        versionName = "1.33"
         ndk { abiFilters += "arm64-v8a" }
     }
 

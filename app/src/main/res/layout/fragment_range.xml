@@ -1,106 +1,109 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- v1.33: ScrollView root REMOVED — a RecyclerView with wrap_content
+     inside a ScrollView only measures ~one screenful of rows and the
+     outer ScrollView swallows scroll gestures, so rows 1/8/9/10 of a
+     10-stable run were unreachable (v1.32 bug). Root is now a plain
+     vertical LinearLayout (same pattern as fragment_backup.xml):
+     the form stays on top, the list takes the remaining space
+     (0dp + weight) and scrolls on its own, so all 10 rows are
+     reachable. Nothing else in this layout changed. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/bg"
+    android:orientation="vertical"
     android:padding="14dp">
 
-    <LinearLayout
+    <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical">
+        android:text="Range Scan"
+        android:textColor="@color/accent"
+        android:textSize="20sp"
+        android:textStyle="bold" />
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Range Scan"
-            android:textColor="@color/accent"
-            android:textSize="20sp"
-            android:textStyle="bold" />
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="Enter CIDRs — found endpoints go to the backup list (or Test list when TEST is checked)"
+        android:textColor="@color/gray"
+        android:textSize="12sp" />
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="Enter CIDRs — found endpoints go to the backup list (or Test list when TEST is checked)"
-            android:textColor="@color/gray"
-            android:textSize="12sp" />
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:text="CIDR (ကော်မာနဲ့ခွဲ)"
+        android:textColor="@color/text"
+        android:textSize="13sp"
+        android:textStyle="bold" />
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
-            android:text="CIDR (ကော်မာနဲ့ခွဲ)"
-            android:textColor="@color/text"
-            android:textSize="13sp"
-            android:textStyle="bold" />
+    <EditText
+        android:id="@+id/etCidrs"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:background="@color/card"
+        android:fontFamily="monospace"
+        android:padding="10dp"
+        android:textColor="@color/text"
+        android:textSize="13sp" />
 
-        <EditText
-            android:id="@+id/etCidrs"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:background="@color/card"
-            android:fontFamily="monospace"
-            android:padding="10dp"
-            android:textColor="@color/text"
-            android:textSize="13sp" />
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="Port (ကော်မာနဲ့ခွဲ)"
+        android:textColor="@color/text"
+        android:textSize="13sp"
+        android:textStyle="bold" />
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Port (ကော်မာနဲ့ခွဲ)"
-            android:textColor="@color/text"
-            android:textSize="13sp"
-            android:textStyle="bold" />
+    <EditText
+        android:id="@+id/etPorts"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:background="@color/card"
+        android:fontFamily="monospace"
+        android:inputType="text"
+        android:padding="10dp"
+        android:textColor="@color/text"
+        android:textSize="13sp" />
 
-        <EditText
-            android:id="@+id/etPorts"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:background="@color/card"
-            android:fontFamily="monospace"
-            android:inputType="text"
-            android:padding="10dp"
-            android:textColor="@color/text"
-            android:textSize="13sp" />
+    <CheckBox
+        android:id="@+id/cbTest"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="TEST scan — save to Test list (never published)"
+        android:textColor="@color/text"
+        android:textSize="13sp" />
 
-        <CheckBox
-            android:id="@+id/cbTest"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="TEST scan — save to Test list (never published)"
-            android:textColor="@color/text"
-            android:textSize="13sp" />
+    <Button
+        android:id="@+id/btnRangeScan"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:backgroundTint="@color/accent"
+        android:text="Range စမယ်"
+        android:textColor="#FFFFFF"
+        android:textSize="16sp"
+        android:textStyle="bold" />
 
-        <Button
-            android:id="@+id/btnRangeScan"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
-            android:backgroundTint="@color/accent"
-            android:text="Range စမယ်"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:textStyle="bold" />
+    <TextView
+        android:id="@+id/tvRangeProgress"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text=""
+        android:textColor="@color/gray"
+        android:textSize="12sp" />
 
-        <TextView
-            android:id="@+id/tvRangeProgress"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:text=""
-            android:textColor="@color/gray"
-            android:textSize="12sp" />
-
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/rvRangeStable"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:nestedScrollingEnabled="false" />
-    </LinearLayout>
-</ScrollView>
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/rvRangeStable"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="10dp" />
+</LinearLayout>
